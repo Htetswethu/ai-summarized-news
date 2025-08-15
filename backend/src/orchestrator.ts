@@ -128,7 +128,7 @@ export class NewsOrchestrator {
 // Global orchestrator reference for cleanup
 let globalOrchestrator: NewsOrchestrator | null = null;
 
-// Handle graceful shutdown
+// Handle graceful shutdown for signal interupt received - Ctrl+C in terminal
 process.on('SIGINT', async () => {
   console.log('\n⚡ Received SIGINT, shutting down gracefully...');
   if (globalOrchestrator) {
@@ -137,6 +137,7 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
+// Handle graceful shutdown for signal terminate received - docker or system shutdown
 process.on('SIGTERM', async () => {
   console.log('\n⚡ Received SIGTERM, shutting down gracefully...');
   if (globalOrchestrator) {
