@@ -18,7 +18,7 @@ export class CrawlerWorker {
   private redisClient: RedisClientType;
   private isRunning = false;
   private batchSize: number;
-  private readonly maxContentLength = 50000; // Prevent extremely large content
+  private readonly maxContentLength = 200000; // Prevent extremely large content
   
   private readonly luaPushContent = `
     local content_queue_key = KEYS[1]

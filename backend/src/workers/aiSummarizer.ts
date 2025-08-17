@@ -58,9 +58,10 @@ export class AiSummarizerWorker {
       ssl: process.env.POSTGRES_SSL === 'true' ? { rejectUnauthorized: false } : false,
     });
 
-    // OpenAI client
+    // OpenAI client (configured for OpenRouter)
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
+      baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
     });
   }
 
@@ -133,17 +134,9 @@ export class AiSummarizerWorker {
       let userPrompt = '';
       
       if (content.contentType === 'code') {
-        systemPrompt = `You are an expert technical content summarizer. Analyze the provided technical article/documentation and provide a structured summary focusing on:
-1. Main technical concepts
-2. Key code examples and their purpose
-3. Practical applications
-4. Important implementation details`;
+        systemPrompt = `You are an expert technical content summarizer. You must respond in Myanmar/Burmese language only. Analyze the provided technical article/documentation and provide a summary focusing on main technical concepts, key code examples, practical applications, and important implementation details.`;
       } else {
-        systemPrompt = `You are an expert content summarizer. Analyze the provided article and provide a structured summary focusing on:
-1. Main points and key information
-2. Important insights or findings
-3. Practical implications
-4. Notable quotes or data points`;
+        systemPrompt = `You are an expert content summarizer. You must respond in Myanmar/Burmese language only. Analyze the provided article and provide a summary focusing on main points, key information, important insights, and practical implications.`;
       }
 
       userPrompt = `
@@ -156,17 +149,17 @@ ${content.text.substring(0, 8000)} ${content.text.length > 8000 ? '...[truncated
 
 ${content.codeSnippets.length > 0 ? `\nCode Snippets:\n${content.codeSnippets.slice(0, 3).join('\n\n---\n\n')}` : ''}
 
-Please provide:
-1. A concise 2-3 sentence summary
-2. 3-5 key points as bullet points
-3. Content category (e.g., "Technology", "Programming", "AI/ML", "Web Development", "Data Science", etc.)
+Please provide a summary in Myanmar/Burmese language in plain text format:
+1. Write a 2-3 sentence summary in Burmese
+2. List 3-5 key points in Burmese (use bullet points •)
+3. Identify content category in English (Technology, Programming, AI/ML, Web Development, Data Science, etc.)
 4. Sentiment analysis (positive/negative/neutral)
 
-Format your response as JSON:
+Format your response as JSON with Burmese text:
 {
-  "summary": "Your summary here",
-  "keyPoints": ["point1", "point2", "point3"],
-  "category": "Category Name",
+  "summary": "Your Burmese summary here",
+  "keyPoints": ["Burmese point 1", "Burmese point 2", "Burmese point 3"],
+  "category": "Category Name in English",
   "sentiment": "positive|negative|neutral"
 }
 `;
@@ -177,7 +170,7 @@ Format your response as JSON:
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
-        max_tokens: 800,
+        max_tokens: 1000,
         temperature: 0.3,
       });
 
