@@ -81,7 +81,6 @@ export class ContentChunkerWorker {
     `;
     
     await this.pgClient.query(createTablesQuery);
-    console.log('Content chunker tables initialized');
   }
 
   /**
@@ -302,13 +301,13 @@ export class ContentChunkerWorker {
    */
   async processContent(content: CrawledContent): Promise<boolean> {
     try {
-      console.log(`Processing content: ${content.title} (${content.total_tokens} tokens)`);
+      console.log(`✂️  ${content.title.substring(0, 60)}${content.title.length > 60 ? '...' : ''} (${content.total_tokens} tokens)`);
 
       // Chunk the text
       const textChunks = this.chunkText(content.raw_text, content.content_type);
       
       if (textChunks.length === 0) {
-        console.warn(`No chunks created for content ${content.id}: ${content.title}`);
+        console.log(`⚠️  No chunks: ${content.title.substring(0, 40)}...`);
         return false;
       }
 
@@ -316,7 +315,7 @@ export class ContentChunkerWorker {
       const savedChunks = await this.saveChunks(content.id!, textChunks, content.content_type);
       
       if (savedChunks.length === 0) {
-        console.error(`Failed to save chunks for content ${content.id}`);
+        console.log(`❌ Failed to save chunks: ${content.title.substring(0, 40)}...`);
         return false;
       }
 
@@ -332,7 +331,7 @@ export class ContentChunkerWorker {
         [content.id]
       );
 
-      console.log(`✅ Processed ${content.title}: ${savedChunks.length} chunks, ${savedGroupsCount} groups`);
+      console.log(`✅ Chunked: ${savedChunks.length} chunks → ${savedGroupsCount} groups`);
       return true;
 
     } catch (error) {
@@ -373,7 +372,9 @@ export class ContentChunkerWorker {
         return 0;
       }
 
-      console.log(`Processing batch of ${result.rows.length} content items`);
+      if (result.rows.length > 0) {
+        console.log(`\n🔪 Chunking ${result.rows.length} articles:`);
+      }
 
       let successCount = 0;
       for (const row of result.rows) {
@@ -394,7 +395,9 @@ export class ContentChunkerWorker {
         }
       }
 
-      console.log(`Processed ${result.rows.length} content items -> ${successCount} successful`);
+      if (result.rows.length > 0) {
+        console.log(`📊 Chunked: ${successCount}/${result.rows.length} successful\n`);
+      }
       return successCount;
 
     } catch (error) {

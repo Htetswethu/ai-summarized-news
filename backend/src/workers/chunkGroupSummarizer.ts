@@ -1,4 +1,5 @@
 import { Client as PgClient } from 'pg';
+import { createClient, RedisClientType } from 'redis';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import { ChunkGroup } from '../types/chunking';
@@ -34,6 +35,7 @@ interface ContentWithGroups {
 
 export class ChunkGroupSummarizerWorker {
   private pgClient: PgClient;
+  private redisClient: RedisClientType;
   private openai: OpenAI;
   private isRunning = false;
   private batchSize: number;
@@ -51,6 +53,11 @@ export class ChunkGroupSummarizerWorker {
       ssl: process.env.POSTGRES_SSL === 'true' ? { rejectUnauthorized: false } : false,
     });
 
+    // Redis client
+    this.redisClient = createClient({
+      url: process.env.REDIS_URL || 'redis://localhost:6379',
+    });
+
     // OpenAI client
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
@@ -61,9 +68,11 @@ export class ChunkGroupSummarizerWorker {
   async connect(): Promise<void> {
     try {
       await this.pgClient.connect();
+      await this.redisClient.connect();
       await this.initializeDatabase();
     } catch (error: any) {
-      if (!error.message?.includes('Client has already been connected')) {
+      if (!error.message?.includes('Client has already been connected') && 
+          !error.message?.includes('The client is already open')) {
         throw error;
       }
     }
@@ -72,8 +81,9 @@ export class ChunkGroupSummarizerWorker {
   async disconnect(): Promise<void> {
     try {
       await this.pgClient.end();
+      await this.redisClient.disconnect();
     } catch (error) {
-      console.warn('Error disconnecting from PostgreSQL:', error);
+      console.warn('Error disconnecting from databases:', error);
     }
   }
 
@@ -87,7 +97,45 @@ export class ChunkGroupSummarizerWorker {
     `;
     
     await this.pgClient.query(alterTableQuery);
-    console.log('Summarized content table updated');
+  }
+
+  /**
+   * Store partial summary in Redis FIFO queue
+   */
+  private async storePartialSummary(crawledContentId: number, partialSummary: SummarizedContent): Promise<void> {
+    const queueKey = `partial_summaries:${crawledContentId}`;
+    const summaryData = JSON.stringify(partialSummary);
+    await this.redisClient.lPush(queueKey, summaryData);
+    console.log(`📦 Stored partial summary in Redis queue: ${queueKey}`);
+  }
+
+  /**
+   * Retrieve all partial summaries from Redis FIFO queue
+   */
+  private async getPartialSummaries(crawledContentId: number): Promise<SummarizedContent[]> {
+    const queueKey = `partial_summaries:${crawledContentId}`;
+    const summaryStrings = await this.redisClient.lRange(queueKey, 0, -1);
+    
+    // Reverse to get FIFO order (lPush adds to beginning, so we need to reverse)
+    const partialSummaries = summaryStrings.reverse().map(str => {
+      const summary = JSON.parse(str);
+      // Convert date strings back to Date objects
+      summary.crawled_at = new Date(summary.crawled_at);
+      summary.summarized_at = new Date(summary.summarized_at);
+      return summary;
+    });
+    
+    console.log(`📤 Retrieved ${partialSummaries.length} partial summaries from Redis`);
+    return partialSummaries;
+  }
+
+  /**
+   * Clean up partial summaries from Redis after final summary is created
+   */
+  private async cleanupPartialSummaries(crawledContentId: number): Promise<void> {
+    const queueKey = `partial_summaries:${crawledContentId}`;
+    await this.redisClient.del(queueKey);
+    console.log(`🧹 Cleaned up Redis queue: ${queueKey}`);
   }
 
   /**
@@ -101,7 +149,7 @@ export class ChunkGroupSummarizerWorker {
     totalGroups: number
   ): Promise<SummarizedContent | null> {
     try {
-      console.log(`Summarizing group ${groupIndex + 1}/${totalGroups} for: ${contentTitle}`);
+      console.log(`🤖 Part ${groupIndex + 1}/${totalGroups}: ${contentTitle.substring(0, 50)}${contentTitle.length > 50 ? '...' : ''} (${group.combined_tokens} tokens)`);
       
       // Prepare context-aware prompt
       let systemPrompt = '';
@@ -146,7 +194,7 @@ Format your response as JSON with Burmese text:
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
-        max_tokens: 1000,
+        max_tokens: 3500,
         temperature: 0.3,
       });
 
@@ -207,7 +255,7 @@ Format your response as JSON with Burmese text:
     }
 
     try {
-      console.log(`Creating final summary from ${partialSummaries.length} parts for: ${contentData.title}`);
+      console.log(`🔄 Final summary: ${contentData.title.substring(0, 50)}${contentData.title.length > 50 ? '...' : ''} (${partialSummaries.length} parts)`);
 
       // Combine all partial summaries
       const combinedSummary = partialSummaries
@@ -244,6 +292,7 @@ Format your response as JSON with Burmese text:
 }
 `;
 
+      console.log('🤖 Calling OpenAI for final summary...');
       const completion = await this.openai.chat.completions.create({
         model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
         messages: [
@@ -253,6 +302,7 @@ Format your response as JSON with Burmese text:
         max_tokens: 1200,
         temperature: 0.3,
       });
+      console.log('✅ OpenAI response received for final summary');
 
       const responseContent = completion.choices[0]?.message?.content;
       if (!responseContent) {
@@ -351,11 +401,11 @@ Format your response as JSON with Burmese text:
    */
   async processArticle(contentData: ContentWithGroups): Promise<boolean> {
     try {
-      console.log(`Processing article: ${contentData.title} (${contentData.groups.length} groups)`);
+      console.log(`\n📝 Summarizing: ${contentData.title.substring(0, 60)}${contentData.title.length > 60 ? '...' : ''} (${contentData.groups.length} groups)`);
 
-      const partialSummaries: SummarizedContent[] = [];
+      let successfulSummaries = 0;
 
-      // Summarize each chunk group
+      // Summarize each chunk group and store in Redis
       for (const group of contentData.groups) {
         const partialSummary = await this.summarizeChunkGroup(
           group,
@@ -369,42 +419,56 @@ Format your response as JSON with Burmese text:
           partialSummary.url = contentData.url;
           partialSummary.crawled_content_id = contentData.id;
           partialSummary.crawled_at = contentData.crawled_at;
-          partialSummaries.push(partialSummary);
+          
+          // Store partial summary in Redis
+          await this.storePartialSummary(contentData.id, partialSummary);
+          successfulSummaries++;
 
           // Mark group as summarized
           await this.pgClient.query(
             "UPDATE chunk_groups SET status = 'summarized', updated_at = CURRENT_TIMESTAMP WHERE id = $1",
             [group.id]
           );
+          console.log(`✅ Part ${group.group_index + 1} completed`);
         } else {
           // Mark group as failed
           await this.pgClient.query(
             "UPDATE chunk_groups SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1",
             [group.id]
           );
+          console.log(`❌ Part ${group.group_index + 1} failed`);
         }
 
         // Rate limiting delay
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
 
-      if (partialSummaries.length === 0) {
-        console.error(`No successful summaries for article: ${contentData.title}`);
+      if (successfulSummaries === 0) {
+        console.log(`❌ No successful summaries: ${contentData.title.substring(0, 40)}...`);
         return false;
       }
 
-      // Create final summary
+      // Retrieve partial summaries from Redis and create final summary
+      console.log('🔄 Creating final summary...');
+      const partialSummaries = await this.getPartialSummaries(contentData.id);
       const finalSummary = await this.createFinalSummary(partialSummaries, contentData);
       
       if (finalSummary) {
+        console.log('💾 Saving final summary to database...');
         const saved = await this.saveSummary(finalSummary);
         if (saved) {
-          console.log(`✅ Successfully summarized: ${contentData.title}`);
+          // Clean up partial summaries from Redis
+          await this.cleanupPartialSummaries(contentData.id);
+          console.log(`✅ Final summary saved: ${contentData.title.substring(0, 50)}${contentData.title.length > 50 ? '...' : ''}`);
           return true;
+        } else {
+          console.log('❌ Failed to save final summary to database');
         }
+      } else {
+        console.log('❌ Failed to create final summary');
       }
 
-      console.error(`Failed to create final summary for: ${contentData.title}`);
+      console.log(`❌ Failed final summary: ${contentData.title.substring(0, 40)}...`);
       return false;
 
     } catch (error) {
@@ -423,12 +487,12 @@ Format your response as JSON with Burmese text:
       // Get articles with pending chunk groups
       const result = await this.pgClient.query(`
         SELECT DISTINCT 
-          cc.id, cc.url, cc.title, cc.content_type, cc.crawled_at,
+          cc.id, cc.url, cc.title, cc.content_type, cc.crawled_at, cc.created_at,
           COUNT(cg.id) as pending_groups
         FROM crawled_content cc
         JOIN chunk_groups cg ON cc.id = cg.crawled_content_id
         WHERE cg.status = 'pending'
-        GROUP BY cc.id, cc.url, cc.title, cc.content_type, cc.crawled_at
+        GROUP BY cc.id, cc.url, cc.title, cc.content_type, cc.crawled_at, cc.created_at
         ORDER BY cc.created_at ASC
         LIMIT $1
       `, [this.batchSize]);
@@ -436,8 +500,6 @@ Format your response as JSON with Burmese text:
       if (result.rows.length === 0) {
         return 0;
       }
-
-      console.log(`Processing batch of ${result.rows.length} articles`);
 
       let successCount = 0;
       
@@ -472,7 +534,9 @@ Format your response as JSON with Burmese text:
         }
       }
 
-      console.log(`Processed ${result.rows.length} articles -> ${successCount} successful`);
+      if (result.rows.length > 0) {
+        console.log(`\n📊 Summarized: ${successCount}/${result.rows.length} articles\n`);
+      }
       return successCount;
 
     } catch (error) {

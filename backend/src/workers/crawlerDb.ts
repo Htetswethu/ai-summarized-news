@@ -88,12 +88,11 @@ export class CrawlerDbWorker {
     `;
     
     await this.pgClient.query(createTableQuery);
-    console.log('Database tables initialized');
   }
 
   async crawlUrl(url: string): Promise<CrawledContent | null> {
     try {
-      console.log(`Crawling: ${url}`);
+      console.log(`🕷️  ${url}`);
       
       const response = await axios.get(url, {
         timeout: 15000,
@@ -104,7 +103,7 @@ export class CrawlerDbWorker {
       });
 
       if (response.status !== 200) {
-        console.warn(`Failed to fetch ${url}: Status ${response.status}`);
+        console.log(`❌ Failed: ${url} (${response.status})`);
         return null;
       }
 
@@ -184,7 +183,7 @@ export class CrawlerDbWorker {
       };
 
     } catch (error) {
-      console.error(`Error crawling ${url}:`, error);
+      console.log(`❌ Error: ${url} (${error instanceof Error ? error.message : 'Unknown error'})`);
       return null;
     }
   }
@@ -256,7 +255,9 @@ export class CrawlerDbWorker {
       // Remove processed URLs from queue
       await this.redisClient.lTrim('url_queue', urls.length, -1);
       
-      console.log(`Processing batch of ${urls.length} URLs`);
+      if (urls.length > 0) {
+        console.log(`\n📥 Processing ${urls.length} URLs:`);
+      }
       
       // Crawl URLs in parallel (with some delay to be respectful)
       const crawlPromises = urls.map((url, index) => 
@@ -277,11 +278,13 @@ export class CrawlerDbWorker {
         const savedId = await this.saveCrawledContent(content);
         if (savedId) {
           savedCount++;
-          console.log(`✅ Saved to database: ${content.title} (ID: ${savedId})`);
+          console.log(`✅ Saved: ${content.title.substring(0, 60)}${content.title.length > 60 ? '...' : ''} (${content.total_tokens} tokens)`);
         }
       }
       
-      console.log(`Processed ${urls.length} URLs -> ${validResults.length} successful crawls -> ${savedCount} saved to database`);
+      if (urls.length > 0) {
+        console.log(`📊 Crawled: ${savedCount}/${urls.length} successful\n`);
+      }
       return savedCount;
       
     } catch (error) {
