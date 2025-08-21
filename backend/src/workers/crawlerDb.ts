@@ -1,56 +1,23 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { createClient, RedisClientType } from 'redis';
+import { Client as PgClient } from 'pg';
 import dotenv from 'dotenv';
+import { CrawledContent, estimateTokenCount } from '../types/chunking';
 
 dotenv.config();
 
-interface CrawledContent {
-  url: string;
-  title: string;
-  text: string;
-  codeSnippets: string[];
-  timestamp: number;
-  contentType: 'article' | 'code' | 'mixed';
-}
-
-export class CrawlerWorker {
+export class CrawlerDbWorker {
   private redisClient: RedisClientType;
+  private pgClient: PgClient;
   private isRunning = false;
   private batchSize: number;
   private readonly maxContentLength = 200000; // Prevent extremely large content
-  
-  private readonly luaPushContent = `
-    local content_queue_key = KEYS[1]
-    local processed_urls_key = KEYS[2]
-    local contents = ARGV
-    
-    local new_contents = {}
-    for i = 1, #contents do
-      local content = contents[i]
-      if content and content ~= "" then
-        local content_data = cjson.decode(content)
-        local url = content_data.url
-        local is_new = redis.call('SADD', processed_urls_key, url)
-        if is_new == 1 then
-          table.insert(new_contents, content)
-        end
-      end
-    end
-    
-    if #new_contents > 0 then
-      redis.call('RPUSH', content_queue_key, unpack(new_contents))
-      redis.call('EXPIRE', content_queue_key, 86400)
-    end
-    
-    redis.call('EXPIRE', processed_urls_key, 86400)
-    
-    return #new_contents
-  `;
 
   constructor() {
     this.batchSize = parseInt(process.env.BATCH_SIZE || '5', 10);
     
+    // Redis for URL queue (input)
     this.redisClient = createClient({
       url: process.env.REDIS_URL || 'redis://localhost:6379'
     });
@@ -58,11 +25,32 @@ export class CrawlerWorker {
     this.redisClient.on('error', (err) => {
       console.error('Redis Client Error:', err);
     });
+
+    // PostgreSQL for content storage (output)
+    this.pgClient = new PgClient({
+      host: process.env.POSTGRES_HOST,
+      port: parseInt(process.env.POSTGRES_PORT || '5432', 10),
+      database: process.env.POSTGRES_DB,
+      user: process.env.POSTGRES_USER,
+      password: process.env.POSTGRES_PASSWORD,
+      ssl: process.env.POSTGRES_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    });
   }
 
   async connect(): Promise<void> {
+    // Connect to Redis
     if (!this.redisClient.isOpen) {
       await this.redisClient.connect();
+    }
+    
+    // Connect to PostgreSQL
+    try {
+      await this.pgClient.connect();
+      await this.initializeDatabase();
+    } catch (error: any) {
+      if (!error.message?.includes('Client has already been connected')) {
+        throw error;
+      }
     }
   }
 
@@ -70,6 +58,37 @@ export class CrawlerWorker {
     if (this.redisClient.isOpen) {
       await this.redisClient.disconnect();
     }
+    
+    try {
+      await this.pgClient.end();
+    } catch (error) {
+      console.warn('Error disconnecting from PostgreSQL:', error);
+    }
+  }
+
+  async initializeDatabase(): Promise<void> {
+    // Ensure our tables exist
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS crawled_content (
+        id SERIAL PRIMARY KEY,
+        url VARCHAR(2048) UNIQUE NOT NULL,
+        title VARCHAR(1000) NOT NULL,
+        raw_text TEXT NOT NULL,
+        code_snippets JSONB NOT NULL DEFAULT '[]',
+        content_type VARCHAR(50) NOT NULL CHECK (content_type IN ('article', 'code', 'mixed')),
+        total_tokens INTEGER,
+        crawled_at TIMESTAMP NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'chunked', 'failed')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      CREATE INDEX IF NOT EXISTS idx_crawled_content_url ON crawled_content(url);
+      CREATE INDEX IF NOT EXISTS idx_crawled_content_status ON crawled_content(status);
+    `;
+    
+    await this.pgClient.query(createTableQuery);
+    console.log('Database tables initialized');
   }
 
   async crawlUrl(url: string): Promise<CrawledContent | null> {
@@ -137,7 +156,6 @@ export class CrawlerWorker {
       $content.find('pre, code, .highlight, .code-block').each((_, element) => {
         const codeText = $(element).text().trim();
         if (codeText.length > 10 && codeText.length < 5000) {
-          // Simple heuristics to identify code
           if (this.looksLikeCode(codeText)) {
             codeSnippets.push(codeText);
           }
@@ -145,7 +163,7 @@ export class CrawlerWorker {
       });
 
       // Determine content type
-      let contentType: CrawledContent['contentType'] = 'article';
+      let contentType: CrawledContent['content_type'] = 'article';
       if (codeSnippets.length > 0) {
         contentType = codeSnippets.length > 3 ? 'code' : 'mixed';
       }
@@ -158,10 +176,11 @@ export class CrawlerWorker {
       return {
         url,
         title: title.substring(0, 500), // Limit title length
-        text: mainContent,
-        codeSnippets: codeSnippets.slice(0, 10), // Limit number of code snippets
-        timestamp: Date.now(),
-        contentType
+        raw_text: mainContent,
+        code_snippets: codeSnippets.slice(0, 10), // Limit number of code snippets
+        content_type: contentType,
+        total_tokens: estimateTokenCount(mainContent),
+        crawled_at: new Date()
       };
 
     } catch (error) {
@@ -187,11 +206,47 @@ export class CrawlerWorker {
     return codeIndicators.some(pattern => pattern.test(text));
   }
 
+  async saveCrawledContent(content: CrawledContent): Promise<number | null> {
+    try {
+      const query = `
+        INSERT INTO crawled_content (
+          url, title, raw_text, code_snippets, content_type, total_tokens, crawled_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (url) 
+        DO UPDATE SET
+          title = EXCLUDED.title,
+          raw_text = EXCLUDED.raw_text,
+          code_snippets = EXCLUDED.code_snippets,
+          content_type = EXCLUDED.content_type,
+          total_tokens = EXCLUDED.total_tokens,
+          crawled_at = EXCLUDED.crawled_at,
+          status = 'pending',
+          updated_at = CURRENT_TIMESTAMP
+        RETURNING id
+      `;
+
+      const result = await this.pgClient.query(query, [
+        content.url,
+        content.title,
+        content.raw_text,
+        JSON.stringify(content.code_snippets),
+        content.content_type,
+        content.total_tokens,
+        content.crawled_at
+      ]);
+
+      return result.rows[0]?.id || null;
+    } catch (error) {
+      console.error(`Error saving crawled content:`, error);
+      return null;
+    }
+  }
+
   async processBatch(): Promise<number> {
     try {
       await this.connect();
       
-      // Get batch of URLs from queue (FIFO)
+      // Get batch of URLs from Redis queue (FIFO)
       const urls = await this.redisClient.lRange('url_queue', 0, this.batchSize - 1);
       
       if (urls.length === 0) {
@@ -203,7 +258,7 @@ export class CrawlerWorker {
       
       console.log(`Processing batch of ${urls.length} URLs`);
       
-      // Crawl URLs in parallel (but with some delay to be respectful)
+      // Crawl URLs in parallel (with some delay to be respectful)
       const crawlPromises = urls.map((url, index) => 
         new Promise<CrawledContent | null>(resolve => {
           setTimeout(async () => {
@@ -214,25 +269,20 @@ export class CrawlerWorker {
       
       const results = await Promise.all(crawlPromises);
       
-      // Filter successful crawls and prepare for Redis
+      // Save successful crawls to database
       const validResults = results.filter((result): result is CrawledContent => result !== null);
       
-      let newContentCount = 0;
-      if (validResults.length > 0) {
-        const serializedContent = validResults.map(content => JSON.stringify(content));
-        
-        // Push content to queue with deduplication
-        newContentCount = await this.redisClient.eval(
-          this.luaPushContent,
-          {
-            keys: ['crawled_content_queue', 'processed_content_urls'],
-            arguments: serializedContent
-          }
-        ) as number;
+      let savedCount = 0;
+      for (const content of validResults) {
+        const savedId = await this.saveCrawledContent(content);
+        if (savedId) {
+          savedCount++;
+          console.log(`✅ Saved to database: ${content.title} (ID: ${savedId})`);
+        }
       }
       
-      console.log(`Processed ${urls.length} URLs -> ${validResults.length} successful crawls -> ${newContentCount} new content items added to queue`);
-      return newContentCount;
+      console.log(`Processed ${urls.length} URLs -> ${validResults.length} successful crawls -> ${savedCount} saved to database`);
+      return savedCount;
       
     } catch (error) {
       console.error('Error processing batch:', error);
@@ -247,7 +297,7 @@ export class CrawlerWorker {
     }
     
     this.isRunning = true;
-    console.log('Starting crawler worker...');
+    console.log('Starting database crawler worker...');
     
     while (this.isRunning) {
       try {
@@ -266,31 +316,31 @@ export class CrawlerWorker {
       }
     }
     
-    console.log('Crawler worker stopped');
+    console.log('Database crawler worker stopped');
   }
 
   stop(): void {
-    console.log('Stopping crawler worker...');
+    console.log('Stopping database crawler worker...');
     this.isRunning = false;
   }
 
-  async getQueueStatus(): Promise<{
+  async getStatus(): Promise<{
     urlQueueLength: number;
-    contentQueueLength: number;
-    processedUrlsCount: number;
+    pendingContentCount: number;
+    totalCrawledCount: number;
   }> {
     await this.connect();
     
-    const [urlQueueLength, contentQueueLength, processedUrlsCount] = await Promise.all([
-      this.redisClient.lLen('url_queue'),
-      this.redisClient.lLen('crawled_content_queue'),
-      this.redisClient.sCard('processed_content_urls')
-    ]);
+    const urlQueueLength = await this.redisClient.lLen('url_queue');
+    
+    // Get database stats
+    const pendingResult = await this.pgClient.query("SELECT COUNT(*) as count FROM crawled_content WHERE status = 'pending'");
+    const totalResult = await this.pgClient.query('SELECT COUNT(*) as count FROM crawled_content');
     
     return {
       urlQueueLength,
-      contentQueueLength,
-      processedUrlsCount
+      pendingContentCount: parseInt(pendingResult.rows[0].count),
+      totalCrawledCount: parseInt(totalResult.rows[0].count),
     };
   }
 

@@ -1,7 +1,8 @@
 import { FetchNewsService } from './services/fetchNewsService';
 import { FetchUrlWorker } from './workers/fetchUrl';
-import { CrawlerWorker } from './workers/crawler';
-import { AiSummarizerWorker } from './workers/aiSummarizer';
+import { CrawlerDbWorker } from './workers/crawlerDb';
+import { ContentChunkerWorker } from './workers/contentChunker';
+import { ChunkGroupSummarizerWorker } from './workers/chunkGroupSummarizer';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -9,26 +10,29 @@ dotenv.config();
 export class NewsOrchestrator {
   private fetchNewsService: FetchNewsService;
   private fetchUrlWorker: FetchUrlWorker;
-  private crawlerWorker: CrawlerWorker;
-  private aiSummarizerWorker: AiSummarizerWorker;
+  private crawlerDbWorker: CrawlerDbWorker;
+  private contentChunkerWorker: ContentChunkerWorker;
+  private chunkGroupSummarizerWorker: ChunkGroupSummarizerWorker;
   
   constructor() {
     this.fetchNewsService = new FetchNewsService();
     this.fetchUrlWorker = new FetchUrlWorker();
-    this.crawlerWorker = new CrawlerWorker();
-    this.aiSummarizerWorker = new AiSummarizerWorker();
+    this.crawlerDbWorker = new CrawlerDbWorker();
+    this.contentChunkerWorker = new ContentChunkerWorker();
+    this.chunkGroupSummarizerWorker = new ChunkGroupSummarizerWorker();
   }
 
   async start(): Promise<void> {
-    console.log('🚀 Starting AI Summarized News Pipeline...\n');
+    console.log('🚀 Starting AI Summarized News Pipeline (Chunked Version)...\n');
     
     try {
       // Start all services concurrently
       await Promise.all([
         this.startFetchNewsService(),
         this.startFetchUrlWorker(),
-        this.startCrawlerWorker(),
-        this.startAiSummarizerWorker()
+        this.startCrawlerDbWorker(),
+        this.startContentChunkerWorker(),
+        this.startChunkGroupSummarizerWorker()
       ]);
     } catch (error) {
       console.error('❌ Error starting services:', error);
@@ -46,14 +50,19 @@ export class NewsOrchestrator {
     await this.fetchUrlWorker.start();
   }
 
-  private async startCrawlerWorker(): Promise<void> {
-    console.log('🕷️  Starting web crawler worker...');
-    await this.crawlerWorker.start();
+  private async startCrawlerDbWorker(): Promise<void> {
+    console.log('🕷️  Starting database crawler worker...');
+    await this.crawlerDbWorker.start();
   }
 
-  private async startAiSummarizerWorker(): Promise<void> {
-    console.log('🤖 Starting AI summarizer worker...');
-    await this.aiSummarizerWorker.start();
+  private async startContentChunkerWorker(): Promise<void> {
+    console.log('✂️  Starting content chunker worker...');
+    await this.contentChunkerWorker.start();
+  }
+
+  private async startChunkGroupSummarizerWorker(): Promise<void> {
+    console.log('🤖 Starting chunk group summarizer worker...');
+    await this.chunkGroupSummarizerWorker.start();
   }
 
   async stop(): Promise<void> {
@@ -62,8 +71,9 @@ export class NewsOrchestrator {
     await Promise.all([
       this.fetchNewsService.cleanup(),
       this.fetchUrlWorker.cleanup(),
-      this.crawlerWorker.cleanup(),
-      this.aiSummarizerWorker.cleanup()
+      this.crawlerDbWorker.cleanup(),
+      this.contentChunkerWorker.cleanup(),
+      this.chunkGroupSummarizerWorker.cleanup()
     ]);
     
     console.log('✅ All workers stopped cleanly');
@@ -71,8 +81,8 @@ export class NewsOrchestrator {
 
   async getStatus(): Promise<void> {
     try {
-      console.log('\n📊 Pipeline Status:');
-      console.log('=================');
+      console.log('\n📊 Chunked Pipeline Status:');
+      console.log('===========================');
       
       // Fetch News Service Status
       const fetchStatus = {
@@ -96,21 +106,45 @@ export class NewsOrchestrator {
       console.log(`   - URLs queue: ${urlStatus.urlQueueLength}`);
       console.log(`   - Processed URLs: ${urlStatus.processedUrlsCount}`);
       
-      // Crawler Status
-      const crawlerStatus = await this.crawlerWorker.getQueueStatus();
-      console.log('\n🕷️  Crawler:');
-      console.log(`   - Running: ${this.crawlerWorker.isWorkerRunning()}`);
+      // Database Crawler Status
+      const crawlerStatus = await this.crawlerDbWorker.getStatus();
+      console.log('\n🕷️  Database Crawler:');
+      console.log(`   - Running: ${this.crawlerDbWorker.isWorkerRunning()}`);
       console.log(`   - URLs queue: ${crawlerStatus.urlQueueLength}`);
-      console.log(`   - Content queue: ${crawlerStatus.contentQueueLength}`);
-      console.log(`   - Processed URLs: ${crawlerStatus.processedUrlsCount}`);
+      console.log(`   - Pending content: ${crawlerStatus.pendingContentCount}`);
+      console.log(`   - Total crawled: ${crawlerStatus.totalCrawledCount}`);
       
-      // AI Summarizer Status
-      const aiStatus = await this.aiSummarizerWorker.getStatus();
-      console.log('\n🤖 AI Summarizer:');
-      console.log(`   - Running: ${this.aiSummarizerWorker.isWorkerRunning()}`);
-      console.log(`   - Content queue: ${aiStatus.contentQueueLength}`);
-      console.log(`   - Total summaries: ${aiStatus.totalSummarizedCount}`);
-      console.log(`   - Recent (24h): ${aiStatus.recentSummariesCount}`);
+      // Content Chunker Status
+      const chunkerStatus = await this.contentChunkerWorker.getStatus();
+      console.log('\n✂️  Content Chunker:');
+      console.log(`   - Running: ${this.contentChunkerWorker.isWorkerRunning()}`);
+      console.log(`   - Pending content: ${chunkerStatus.pendingContentCount}`);
+      console.log(`   - Chunked content: ${chunkerStatus.chunkedContentCount}`);
+      console.log(`   - Total chunks: ${chunkerStatus.totalChunksCount}`);
+      console.log(`   - Pending groups: ${chunkerStatus.pendingGroupsCount}`);
+      
+      // Chunk Group Summarizer Status
+      const summarizerStatus = await this.chunkGroupSummarizerWorker.getStatus();
+      console.log('\n🤖 Chunk Group Summarizer:');
+      console.log(`   - Running: ${this.chunkGroupSummarizerWorker.isWorkerRunning()}`);
+      console.log(`   - Pending groups: ${summarizerStatus.pendingGroupsCount}`);
+      console.log(`   - Articles ready: ${summarizerStatus.articlesReadyCount}`);
+      console.log(`   - Total summaries: ${summarizerStatus.totalSummariesCount}`);
+      console.log(`   - Recent (24h): ${summarizerStatus.recentSummariesCount}`);
+      
+      // Pipeline Health Summary
+      console.log('\n🏥 Pipeline Health:');
+      const totalPendingWork = 
+        fetchStatus.queueLength + 
+        urlStatus.idsQueueLength + 
+        urlStatus.urlQueueLength + 
+        crawlerStatus.pendingContentCount + 
+        chunkerStatus.pendingContentCount + 
+        summarizerStatus.pendingGroupsCount;
+      
+      console.log(`   - Total pending work: ${totalPendingWork} items`);
+      console.log(`   - Articles processed today: ${summarizerStatus.recentSummariesCount}`);
+      console.log(`   - Pipeline status: ${totalPendingWork > 0 ? '🔄 Processing' : '✅ Idle'}`);
       
     } catch (error) {
       console.error('Error getting status:', error);

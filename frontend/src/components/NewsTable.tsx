@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { useRouter } from "next/router"
 import {
   Table,
   TableBody,
@@ -19,6 +20,7 @@ interface NewsItem {
 }
 
 export default function NewsTable() {
+  const router = useRouter()
   const [newsItems, setNewsItems] = useState<NewsItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -42,12 +44,8 @@ export default function NewsTable() {
     fetchNews()
   }, [])
 
-  const handleSeeSummary = (id: string, summary?: string) => {
-    if (summary) {
-      alert(summary)
-    } else {
-      console.log(`Summary not available for article ${id}`)
-    }
+  const handleSeeSummary = (id: string) => {
+    router.push(`/article/${id}`)
   }
 
   const handleGoToOriginal = (url: string) => {
@@ -99,7 +97,7 @@ export default function NewsTable() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => handleSeeSummary(item.id, item.summary)}
+                      onClick={() => handleSeeSummary(item.id)}
                       className="flex items-center gap-1"
                       disabled={!item.summary}
                     >
