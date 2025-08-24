@@ -8,6 +8,7 @@ import {
   DEFAULT_CHUNKING_CONFIG,
   estimateTokenCount,
   findTextBoundaries,
+  getChunkType,
   TextBoundary
 } from '../types/chunking';
 
@@ -61,7 +62,7 @@ export class ContentChunkerWorker {
         chunk_index INTEGER NOT NULL,
         chunk_text TEXT NOT NULL,
         token_count INTEGER NOT NULL,
-        chunk_type VARCHAR(20) DEFAULT 'text' CHECK (chunk_type IN ('article', 'code', 'mixed')),
+        chunk_type VARCHAR(20) DEFAULT 'text' CHECK (chunk_type IN ('text', 'code', 'mixed')),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(crawled_content_id, chunk_index)
       );
@@ -238,7 +239,7 @@ export class ContentChunkerWorker {
           i,
           chunkText,
           tokenCount,
-          contentType
+          getChunkType(contentType)
         ]);
 
         savedChunks.push({
@@ -247,7 +248,7 @@ export class ContentChunkerWorker {
           chunk_index: i,
           chunk_text: chunkText,
           token_count: tokenCount,
-          chunk_type: contentType
+          chunk_type: getChunkType(contentType)
         });
       } catch (error) {
         console.error(`Error saving chunk ${i} for content ${contentId}:`, error);

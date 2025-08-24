@@ -241,12 +241,16 @@ Format your response as JSON with Burmese text:
   }
 
   /**
-   * Create a final summary from multiple partial summaries
+   * Combine partial summaries into one summary (no additional OpenAI call)
    */
-  async createFinalSummary(
+  combinePartialSummaries(
     partialSummaries: SummarizedContent[],
     contentData: ContentWithGroups
-  ): Promise<SummarizedContent | null> {
+  ): SummarizedContent | null {
+    if (partialSummaries.length === 0) {
+      return null;
+    }
+
     if (partialSummaries.length === 1) {
       // Only one partial summary, make it the final summary
       const summary = partialSummaries[0];
@@ -254,97 +258,45 @@ Format your response as JSON with Burmese text:
       return summary;
     }
 
-    try {
-      console.log(`🔄 Final summary: ${contentData.title.substring(0, 50)}${contentData.title.length > 50 ? '...' : ''} (${partialSummaries.length} parts)`);
+    // Combine multiple partial summaries directly without additional OpenAI call
+    console.log(`🔄 Combining ${partialSummaries.length} partial summaries`);
 
-      // Combine all partial summaries
-      const combinedSummary = partialSummaries
-        .map((s, i) => `Part ${i + 1}: ${s.summary}`)
-        .join('\n\n');
-      
-      const combinedKeyPoints = partialSummaries
-        .flatMap(s => s.key_points)
-        .filter(point => point && point.trim().length > 0);
+    // Combine all partial summaries
+    const combinedSummary = partialSummaries
+      .map((s, i) => `${s.summary}`)
+      .join(' ');
+    
+    const combinedKeyPoints = partialSummaries
+      .flatMap(s => s.key_points)
+      .filter(point => point && point.trim().length > 0)
+      .slice(0, 8); // Limit to 8 key points
 
-      const systemPrompt = `You are an expert content summarizer. You must respond in Myanmar/Burmese language only. You are given multiple partial summaries of an article. Create a cohesive final summary that captures the overall essence of the entire article.`;
+    // Get the most common category and sentiment
+    const categories = partialSummaries.map(s => s.category);
+    const mostCommonCategory = categories.sort((a, b) =>
+      categories.filter(v => v === a).length - categories.filter(v => v === b).length
+    ).pop() || 'General';
 
-      const userPrompt = `
-Article: "${contentData.title}"
-Content Type: ${contentData.content_type}
+    const sentiments = partialSummaries.map(s => s.sentiment);
+    const mostCommonSentiment = sentiments.sort((a, b) =>
+      sentiments.filter(v => v === a).length - sentiments.filter(v => v === b).length
+    ).pop() || 'neutral';
 
-Partial Summaries:
-${combinedSummary}
-
-Combined Key Points:
-${combinedKeyPoints.map((point, i) => `• ${point}`).join('\n')}
-
-Please create a final cohesive summary in Myanmar/Burmese that captures the overall article:
-1. Write a comprehensive 3-4 sentence summary in Burmese
-2. Select and refine the most important 4-6 key points in Burmese
-3. Determine the overall category and sentiment
-
-Format your response as JSON with Burmese text:
-{
-  "summary": "Your comprehensive Burmese summary here",
-  "keyPoints": ["Refined Burmese point 1", "Refined Burmese point 2", "Refined Burmese point 3"],
-  "category": "Overall Category Name in English",
-  "sentiment": "overall_sentiment"
-}
-`;
-
-      console.log('🤖 Calling OpenAI for final summary...');
-      const completion = await this.openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        max_tokens: 1200,
-        temperature: 0.3,
-      });
-      console.log('✅ OpenAI response received for final summary');
-
-      const responseContent = completion.choices[0]?.message?.content;
-      if (!responseContent) {
-        throw new Error('No response from OpenAI');
-      }
-
-      let aiResponse;
-      try {
-        const cleanedResponse = responseContent.replace(/```json\s*|\s*```/g, '').trim();
-        aiResponse = JSON.parse(cleanedResponse);
-      } catch (parseError) {
-        console.error('Failed to parse final summary response:', responseContent);
-        // Fallback: combine the best partial summary
-        const bestPartial = partialSummaries[0];
-        aiResponse = {
-          summary: bestPartial.summary,
-          keyPoints: combinedKeyPoints.slice(0, 6),
-          category: bestPartial.category,
-          sentiment: bestPartial.sentiment
-        };
-      }
-
-      return {
-        url: contentData.url,
-        title: contentData.title,
-        original_text: partialSummaries.map(s => s.original_text).join('\n\n').substring(0, 15000),
-        summary: aiResponse.summary || 'Final summary not available',
-        key_points: aiResponse.keyPoints || combinedKeyPoints.slice(0, 6),
-        code_snippets: [], // TODO: Extract from content
-        content_type: contentData.content_type,
-        sentiment: aiResponse.sentiment || partialSummaries[0].sentiment,
-        category: aiResponse.category || partialSummaries[0].category,
-        crawled_at: contentData.crawled_at,
-        summarized_at: new Date(),
-        crawled_content_id: contentData.id,
-        is_partial_summary: false
-      };
-
-    } catch (error) {
-      console.error('Error creating final summary:', error);
-      return null;
-    }
+    return {
+      url: contentData.url,
+      title: contentData.title,
+      original_text: partialSummaries.map(s => s.original_text).join('\n\n').substring(0, 15000),
+      summary: combinedSummary,
+      key_points: combinedKeyPoints,
+      code_snippets: partialSummaries.flatMap(s => s.code_snippets),
+      content_type: contentData.content_type,
+      sentiment: mostCommonSentiment as 'positive' | 'negative' | 'neutral',
+      category: mostCommonCategory,
+      crawled_at: contentData.crawled_at,
+      summarized_at: new Date(),
+      crawled_content_id: contentData.id,
+      is_partial_summary: false
+    };
   }
 
   /**
@@ -405,7 +357,9 @@ Format your response as JSON with Burmese text:
 
       let successfulSummaries = 0;
 
-      // Summarize each chunk group and store in Redis
+      const partialSummaries: SummarizedContent[] = [];
+
+      // Summarize each chunk group
       for (const group of contentData.groups) {
         const partialSummary = await this.summarizeChunkGroup(
           group,
@@ -420,8 +374,7 @@ Format your response as JSON with Burmese text:
           partialSummary.crawled_content_id = contentData.id;
           partialSummary.crawled_at = contentData.crawled_at;
           
-          // Store partial summary in Redis
-          await this.storePartialSummary(contentData.id, partialSummary);
+          partialSummaries.push(partialSummary);
           successfulSummaries++;
 
           // Mark group as summarized
@@ -448,27 +401,24 @@ Format your response as JSON with Burmese text:
         return false;
       }
 
-      // Retrieve partial summaries from Redis and create final summary
-      console.log('🔄 Creating final summary...');
-      const partialSummaries = await this.getPartialSummaries(contentData.id);
-      const finalSummary = await this.createFinalSummary(partialSummaries, contentData);
+      // Combine partial summaries directly
+      console.log('🔄 Combining summaries...');
+      const combinedSummary = this.combinePartialSummaries(partialSummaries, contentData);
       
-      if (finalSummary) {
-        console.log('💾 Saving final summary to database...');
-        const saved = await this.saveSummary(finalSummary);
+      if (combinedSummary) {
+        console.log('💾 Saving combined summary to database...');
+        const saved = await this.saveSummary(combinedSummary);
         if (saved) {
-          // Clean up partial summaries from Redis
-          await this.cleanupPartialSummaries(contentData.id);
-          console.log(`✅ Final summary saved: ${contentData.title.substring(0, 50)}${contentData.title.length > 50 ? '...' : ''}`);
+          console.log(`✅ Combined summary saved: ${contentData.title.substring(0, 50)}${contentData.title.length > 50 ? '...' : ''}`);
           return true;
         } else {
-          console.log('❌ Failed to save final summary to database');
+          console.log('❌ Failed to save combined summary to database');
         }
       } else {
-        console.log('❌ Failed to create final summary');
+        console.log('❌ Failed to combine summaries');
       }
 
-      console.log(`❌ Failed final summary: ${contentData.title.substring(0, 40)}...`);
+      console.log(`❌ Failed combined summary: ${contentData.title.substring(0, 40)}...`);
       return false;
 
     } catch (error) {

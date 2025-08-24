@@ -44,7 +44,7 @@ export interface ContentChunk {
   chunk_index: number;
   chunk_text: string;
   token_count: number;
-  chunk_type: 'article' | 'code' | 'mixed';
+  chunk_type: 'text' | 'code' | 'mixed';
 }
 
 export interface ChunkGroup {
@@ -69,6 +69,20 @@ export interface TextBoundary {
   index: number;
   type: 'paragraph' | 'sentence' | 'section' | 'code_block';
   priority: number; // Higher priority = better breaking point
+}
+
+// Convert content type to chunk type
+export function getChunkType(contentType: 'article' | 'code' | 'mixed'): 'text' | 'code' | 'mixed' {
+  switch (contentType) {
+    case 'article':
+      return 'text';
+    case 'code':
+      return 'code';
+    case 'mixed':
+      return 'mixed';
+    default:
+      return 'text';
+  }
 }
 
 export function findTextBoundaries(text: string): TextBoundary[] {

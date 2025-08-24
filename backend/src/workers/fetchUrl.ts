@@ -91,8 +91,6 @@ export class FetchUrlWorker {
       // Remove processed IDs from queue
       await this.redisClient.lTrim('ids_queue', ids.length, -1);
       
-      console.log(`Processing batch of ${ids.length} story IDs`);
-      
       // Fetch items in parallel
       const itemPromises = ids.map(id => this.fetchItemById(parseInt(id, 10)));
       const items = await Promise.all(itemPromises);

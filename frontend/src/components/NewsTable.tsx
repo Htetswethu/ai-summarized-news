@@ -72,11 +72,22 @@ export default function NewsTable() {
 
   return (
     <div className="container mx-auto py-8">
-      <h1 className="text-3xl font-bold text-center mb-8">AI-Summarized-News</h1>
+      <div className="flex justify-between items-center mb-8">
+        <h1 className="text-3xl font-bold">AI-Summarized-News</h1>
+        <div className="flex gap-4">
+          <Button
+            variant="outline"
+            onClick={() => router.push('/dashboard')}
+            className="flex items-center gap-2"
+          >
+            Dashboard
+          </Button>
+        </div>
+      </div>
       
       {newsItems.length === 0 ? (
         <div className="text-center py-8">
-          <p className="text-gray-500 text-lg">No news to post</p>
+          <p className="text-gray-700 text-lg">No news to post</p>
         </div>
       ) : (
         <Table>

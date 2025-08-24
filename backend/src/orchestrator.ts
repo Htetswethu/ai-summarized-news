@@ -189,9 +189,6 @@ async function main() {
   console.log('📋 Checking initial pipeline status...');
   await orchestrator.getStatus();
   
-  // Start status monitoring
-  orchestrator.runStatusLoop();
-  
   // Start the pipeline
   await orchestrator.start();
 }
